@@ -37,11 +37,10 @@ find_package(rclcpp_components REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(apriltag_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
-find_package(image_transport REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(Eigen3 REQUIRED NO_MODULE)
 find_package(Threads REQUIRED)
-find_package(OpenCV REQUIRED COMPONENTS core calib3d)
+find_package(OpenCV REQUIRED COMPONENTS core calib3d imgproc videoio)
 find_package(apriltag 3.2 REQUIRED)
 
 if(cv_bridge_VERSION VERSION_GREATER_EQUAL 3.3.0)
@@ -108,13 +107,16 @@ ament_target_dependencies(AprilTagNode
     sensor_msgs
     apriltag_msgs
     tf2_ros
-    image_transport
     cv_bridge
 )
 target_link_libraries(AprilTagNode
     apriltag::apriltag
     tags
     pose_estimation
+    opencv_core
+    opencv_imgproc
+    opencv_videoio
+    Threads::Threads
 )
 rclcpp_components_register_node(AprilTagNode
     PLUGIN "AprilTagNode"

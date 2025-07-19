@@ -17,12 +17,13 @@
   <depend>tf2_ros</depend>
   <depend>apriltag_msgs</depend>
   <depend>apriltag</depend>
-  <depend>image_transport</depend>
   <depend>cv_bridge</depend>
+  <depend>libopencv-dev</depend>
 
-  <exec_depend>camera_ros</exec_depend>
-  <exec_depend condition="$ROS_DISTRO != 'humble'">image_proc</exec_depend>
-  <exec_depend>image_transport_plugins</exec_depend>
+  <!-- Optional dependencies for camera info publishing -->
+  <!-- <exec_depend>camera_ros</exec_depend> -->
+  <!-- <exec_depend condition="$ROS_DISTRO != 'humble'">image_proc</exec_depend> -->
+  <!-- <exec_depend>image_transport_plugins</exec_depend> -->
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_cmake_clang_format</test_depend>

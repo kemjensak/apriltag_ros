@@ -7,17 +7,23 @@
 #else
 #include <cv_bridge/cv_bridge.h>
 #endif
-#include <image_transport/camera_subscriber.hpp>
-#include <image_transport/image_transport.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_components/register_node_macro.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 
+// opencv
+#include <opencv2/opencv.hpp>
+#include <opencv2/imgproc.hpp>
+
 // apriltag
 #include "tag_functions.hpp"
 #include <apriltag.h>
+
+// threading
+#include <thread>
+#include <atomic>
 
 
 #define IF(N, V) \
@@ -78,15 +84,25 @@ private:
 
     std::function<void(apriltag_family_t*)> tf_destructor;
 
-    const image_transport::CameraSubscriber sub_cam;
+    // Camera and processing
+    cv::VideoCapture camera;
+    std::thread camera_thread;
+    std::atomic<bool> running;
+    std::atomic<bool> camera_resolution_set;
+    std::string camera_device_str;
+    sensor_msgs::msg::CameraInfo::SharedPtr camera_info;
+    
     const rclcpp::Publisher<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr pub_detections;
+    const rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr sub_camera_info;
     tf2_ros::TransformBroadcaster tf_broadcaster;
 
     pose_estimation_f estimate_pose = nullptr;
 
-    void onCamera(const sensor_msgs::msg::Image::ConstSharedPtr& msg_img, const sensor_msgs::msg::CameraInfo::ConstSharedPtr& msg_ci);
+    void cameraLoop();
+    void processFrame(const cv::Mat& frame);
 
     rcl_interfaces::msg::SetParametersResult onParameter(const std::vector<rclcpp::Parameter>& parameters);
+    void onCameraInfo(const sensor_msgs::msg::CameraInfo::SharedPtr msg);
 };
 
 RCLCPP_COMPONENTS_REGISTER_NODE(AprilTagNode)
@@ -97,19 +113,22 @@ AprilTagNode::AprilTagNode(const rclcpp::NodeOptions& options)
     // parameter
     cb_parameter(add_on_set_parameters_callback(std::bind(&AprilTagNode::onParameter, this, std::placeholders::_1))),
     td(apriltag_detector_create()),
+    running(false),
+    camera_resolution_set(false),
     // topics
-    sub_cam(image_transport::create_camera_subscription(
-        this,
-        this->get_node_topics_interface()->resolve_topic_name("image_rect"),
-        std::bind(&AprilTagNode::onCamera, this, std::placeholders::_1, std::placeholders::_2),
-        declare_parameter("image_transport", "raw", descr({}, true)),
-        rmw_qos_profile_sensor_data)),
     pub_detections(create_publisher<apriltag_msgs::msg::AprilTagDetectionArray>("detections", rclcpp::QoS(1))),
+    sub_camera_info(create_subscription<sensor_msgs::msg::CameraInfo>(
+        "camera_info", 
+        rclcpp::QoS(1), 
+        std::bind(&AprilTagNode::onCameraInfo, this, std::placeholders::_1))),
     tf_broadcaster(this)
 {
     // read-only parameters
     const std::string tag_family = declare_parameter("family", "36h11", descr("tag family", true));
     tag_edge_size = declare_parameter("size", 1.0, descr("default tag size", true));
+    
+    // Camera device parameter - can be device path (e.g., "/dev/jetcocam0") or index (e.g., "0")
+    camera_device_str = declare_parameter("camera_device", "/dev/jetcocam0", descr("camera device path or index", true));
 
     // get tag names, IDs and sizes
     const auto ids = declare_parameter("tag.ids", std::vector<int64_t>{}, descr("tag ids", true));
@@ -166,22 +185,80 @@ AprilTagNode::AprilTagNode(const rclcpp::NodeOptions& options)
     else {
         throw std::runtime_error("Unsupported tag family: " + tag_family);
     }
+
+    // Camera will be initialized when camera_info is received
+    RCLCPP_INFO(get_logger(), "Waiting for camera_info to initialize camera...");
+    
+    // Start camera thread (it will wait for camera to be opened)
+    running = true;
+    camera_thread = std::thread(&AprilTagNode::cameraLoop, this);
+    
+    RCLCPP_INFO(get_logger(), "AprilTag detector created, waiting for camera_info");
 }
 
 AprilTagNode::~AprilTagNode()
 {
+    // Stop camera thread
+    running = false;
+    if (camera_thread.joinable()) {
+        camera_thread.join();
+    }
+    
+    // Release camera
+    if (camera.isOpened()) {
+        camera.release();
+    }
+    
     apriltag_detector_destroy(td);
     tf_destructor(tf);
 }
 
-void AprilTagNode::onCamera(const sensor_msgs::msg::Image::ConstSharedPtr& msg_img,
-                            const sensor_msgs::msg::CameraInfo::ConstSharedPtr& msg_ci)
+void AprilTagNode::cameraLoop()
 {
+    cv::Mat frame;
+    
+    while (running && rclcpp::ok()) {
+        if (!camera.isOpened()) {
+            // Camera not opened yet, wait
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+        
+        if (!camera.read(frame)) {
+            RCLCPP_WARN(get_logger(), "Failed to read frame from camera");
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        
+        if (!frame.empty()) {
+            processFrame(frame);
+        }
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
+void AprilTagNode::processFrame(const cv::Mat& frame)
+{
+    if (!camera_info) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "No camera info received yet");
+        return;
+    }
+    
+    // Wait for camera resolution to be set from camera_info
+    if (!camera_resolution_set) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "Waiting for camera resolution to be set from camera_info");
+        return;
+    }
+
     // camera intrinsics for rectified images
-    const std::array<double, 4> intrinsics = {msg_ci->p[0], msg_ci->p[5], msg_ci->p[2], msg_ci->p[6]};
+    const std::array<double, 4> intrinsics = {
+        camera_info->p[0], camera_info->p[5], 
+        camera_info->p[2], camera_info->p[6]
+    };
 
     // check for valid intrinsics
-    const bool calibrated = msg_ci->width && msg_ci->height &&
+    const bool calibrated = camera_info->width && camera_info->height &&
                             intrinsics[0] && intrinsics[1] && intrinsics[2] && intrinsics[3];
 
     if(estimate_pose != nullptr && !calibrated) {
@@ -189,7 +266,12 @@ void AprilTagNode::onCamera(const sensor_msgs::msg::Image::ConstSharedPtr& msg_i
     }
 
     // convert to 8bit monochrome image
-    const cv::Mat img_uint8 = cv_bridge::toCvShare(msg_img, "mono8")->image;
+    cv::Mat img_uint8;
+    if (frame.channels() == 3) {
+        cv::cvtColor(frame, img_uint8, cv::COLOR_BGR2GRAY);
+    } else {
+        img_uint8 = frame;
+    }
 
     image_u8_t im{img_uint8.cols, img_uint8.rows, img_uint8.cols, img_uint8.data};
 
@@ -202,7 +284,8 @@ void AprilTagNode::onCamera(const sensor_msgs::msg::Image::ConstSharedPtr& msg_i
         timeprofile_display(td->tp);
 
     apriltag_msgs::msg::AprilTagDetectionArray msg_detections;
-    msg_detections.header = msg_img->header;
+    msg_detections.header.stamp = this->get_clock()->now();
+    msg_detections.header.frame_id = camera_info->header.frame_id;
 
     std::vector<geometry_msgs::msg::TransformStamped> tfs;
 
@@ -236,7 +319,7 @@ void AprilTagNode::onCamera(const sensor_msgs::msg::Image::ConstSharedPtr& msg_i
         // 3D orientation and position
         if(estimate_pose != nullptr && calibrated) {
             geometry_msgs::msg::TransformStamped tf;
-            tf.header = msg_img->header;
+            tf.header = msg_detections.header;
             // set child frame name by generic tag name or configured tag name
             tf.child_frame_id = tag_frames.count(det->id) ? tag_frames.at(det->id) : std::string(det->family->name) + ":" + std::to_string(det->id);
             const double size = tag_sizes.count(det->id) ? tag_sizes.at(det->id) : tag_edge_size;
@@ -251,6 +334,55 @@ void AprilTagNode::onCamera(const sensor_msgs::msg::Image::ConstSharedPtr& msg_i
         tf_broadcaster.sendTransform(tfs);
 
     apriltag_detections_destroy(detections);
+}
+
+void AprilTagNode::onCameraInfo(const sensor_msgs::msg::CameraInfo::SharedPtr msg)
+{
+    camera_info = msg;
+    
+    // Initialize camera only once when camera_info is first received
+    if (!camera_resolution_set && !camera.isOpened() && msg->width > 0 && msg->height > 0) {
+        // Try to open camera
+        bool camera_opened = false;
+        try {
+            // Try to parse as integer first (for device index)
+            int device_index = std::stoi(camera_device_str);
+            camera.open(device_index);
+            if (camera.isOpened()) {
+                camera_opened = true;
+                RCLCPP_INFO(get_logger(), "Opened camera device by index: %d", device_index);
+            }
+        } catch (const std::exception&) {
+            // Not a valid integer, treat as device path
+        }
+        
+        if (!camera_opened) {
+            // Try to open as device path
+            camera.open(camera_device_str);
+            if (camera.isOpened()) {
+                camera_opened = true;
+                RCLCPP_INFO(get_logger(), "Opened camera device by path: %s", camera_device_str.c_str());
+            }
+        }
+        
+        if (!camera_opened) {
+            RCLCPP_ERROR(get_logger(), "Failed to open camera device: %s", camera_device_str.c_str());
+            return;
+        }
+        
+        // Set camera resolution from camera_info
+        camera.set(cv::CAP_PROP_FRAME_WIDTH, msg->width);
+        camera.set(cv::CAP_PROP_FRAME_HEIGHT, msg->height);
+        
+        // Verify resolution was set
+        int actual_width = static_cast<int>(camera.get(cv::CAP_PROP_FRAME_WIDTH));
+        int actual_height = static_cast<int>(camera.get(cv::CAP_PROP_FRAME_HEIGHT));
+        RCLCPP_INFO(get_logger(), "Camera resolution set to: %dx%d (requested from camera_info: %dx%d)", 
+                    actual_width, actual_height, msg->width, msg->height);
+        
+        camera_resolution_set = true;
+        RCLCPP_INFO(get_logger(), "AprilTag detector started with camera device: %s", camera_device_str.c_str());
+    }
 }
 
 rcl_interfaces::msg::SetParametersResult
