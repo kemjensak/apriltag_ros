@@ -231,7 +231,10 @@ void AprilTagNode::cameraLoop()
         }
         
         if (!frame.empty()) {
-            processFrame(frame);
+            // Rotate frame 180 degrees
+            cv::Mat rotated_frame;
+            cv::rotate(frame, rotated_frame, cv::ROTATE_180);
+            processFrame(rotated_frame);
         }
         
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -373,6 +376,8 @@ void AprilTagNode::onCameraInfo(const sensor_msgs::msg::CameraInfo::SharedPtr ms
         // Set camera resolution from camera_info
         camera.set(cv::CAP_PROP_FRAME_WIDTH, msg->width);
         camera.set(cv::CAP_PROP_FRAME_HEIGHT, msg->height);
+        camera.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G')); // Set MJPEG codec for better performance
+        camera.set(cv::CAP_PROP_FPS, 30); // Set a reasonable FPS
         
         // Verify resolution was set
         int actual_width = static_cast<int>(camera.get(cv::CAP_PROP_FRAME_WIDTH));
