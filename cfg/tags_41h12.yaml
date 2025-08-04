@@ -1,8 +1,14 @@
 /**:
     ros__parameters:
         family: Standard41h12   # tag family name
+<<<<<<< Updated upstream
         size: 0.017             # tag edge size in meter
         camera_device: "/dev/jetcocam0"  # camera device path or index (e.g., "/dev/video0" or "0")
+=======
+        size: 0.0152            # tag edge size in meter with ov3660 camera, 1 calibration
+        # size: 0.0152             # tag edge size in meter with ov3660 camera, 1 calibration
+        camera_device: "/dev/video5"  # camera device path or index (e.g., "/dev/video0" or "0")
+>>>>>>> Stashed changes
         max_hamming: 0          # maximum allowed hamming distance (corrected bits)
 
         # see "apriltag.h" 'struct apriltag_detector' for more documentation on these optional parameters
@@ -15,4 +21,8 @@
             debug: False        # write additional debugging images to current working directory
 
 
+<<<<<<< Updated upstream
         pose_estimation_method: "pnp"   # method for estimating the tag pose
+=======
+        pose_estimation_method: "pnp"   # method for estimating the tag pose
+>>>>>>> Stashed changes
