@@ -92,6 +92,14 @@ private:
     std::string camera_device_str;
     sensor_msgs::msg::CameraInfo::SharedPtr camera_info;
     
+    // Camera matrix and distortion coefficients for undistortion
+    cv::Mat camera_matrix;
+    cv::Mat dist_coeffs;
+    bool calibration_loaded;
+    
+    // Bayer pattern for de-bayering
+    std::string bayer_pattern;
+    
     const rclcpp::Publisher<apriltag_msgs::msg::AprilTagDetectionArray>::SharedPtr pub_detections;
     const rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr sub_camera_info;
     tf2_ros::TransformBroadcaster tf_broadcaster;
@@ -115,6 +123,7 @@ AprilTagNode::AprilTagNode(const rclcpp::NodeOptions& options)
     td(apriltag_detector_create()),
     running(false),
     camera_resolution_set(false),
+    calibration_loaded(false),
     // topics
     pub_detections(create_publisher<apriltag_msgs::msg::AprilTagDetectionArray>("detections", rclcpp::QoS(1))),
     sub_camera_info(create_subscription<sensor_msgs::msg::CameraInfo>(
@@ -220,23 +229,27 @@ void AprilTagNode::cameraLoop()
     while (running && rclcpp::ok()) {
         if (!camera.isOpened()) {
             // Camera not opened yet, wait
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
         
         if (!camera.read(frame)) {
             RCLCPP_WARN(get_logger(), "Failed to read frame from camera");
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
         
         if (!frame.empty()) {
-            // Rotate frame 180 degrees
-            cv::Mat rotated_frame;
-            cv::rotate(frame, rotated_frame, cv::ROTATE_180);
-            processFrame(rotated_frame);
+            // Apply distortion correction if camera calibration is available
+            cv::Mat undistorted_frame;
+            if (calibration_loaded && !camera_matrix.empty() && !dist_coeffs.empty()) {
+                cv::undistort(frame, undistorted_frame, camera_matrix, dist_coeffs);
+                processFrame(undistorted_frame);
+            } else {
+                processFrame(frame);
+            }
         }
-        
+
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
@@ -342,6 +355,29 @@ void AprilTagNode::processFrame(const cv::Mat& frame)
 void AprilTagNode::onCameraInfo(const sensor_msgs::msg::CameraInfo::SharedPtr msg)
 {
     camera_info = msg;
+    
+    // Load camera calibration parameters for distortion correction
+    if (!calibration_loaded && msg->k.size() >= 9 && msg->d.size() >= 4) {
+        // Camera matrix (K)
+        camera_matrix = cv::Mat::eye(3, 3, CV_64F);
+        camera_matrix.at<double>(0, 0) = msg->k[0]; // fx
+        camera_matrix.at<double>(1, 1) = msg->k[4]; // fy
+        camera_matrix.at<double>(0, 2) = msg->k[2]; // cx
+        camera_matrix.at<double>(1, 2) = msg->k[5]; // cy
+        
+        // Distortion coefficients (D)
+        dist_coeffs = cv::Mat::zeros(msg->d.size(), 1, CV_64F);
+        for (size_t i = 0; i < msg->d.size(); ++i) {
+            dist_coeffs.at<double>(i, 0) = msg->d[i];
+        }
+        
+        calibration_loaded = true;
+        RCLCPP_INFO(get_logger(), "Camera calibration loaded for distortion correction");
+        RCLCPP_INFO(get_logger(), "Camera matrix: fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f", 
+                    msg->k[0], msg->k[4], msg->k[2], msg->k[5]);
+        RCLCPP_INFO(get_logger(), "Distortion coefficients: k1=%.6f, k2=%.6f, p1=%.6f, p2=%.6f", 
+                    msg->d[0], msg->d[1], msg->d[2], msg->d[3]);
+    }
     
     // Initialize camera only once when camera_info is first received
     if (!camera_resolution_set && !camera.isOpened() && msg->width > 0 && msg->height > 0) {

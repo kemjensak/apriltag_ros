@@ -3,7 +3,8 @@
         family: Standard41h12   # tag family name
         size: 0.0152            # tag edge size in meter with ov3660 camera, 1 calibration
         # size: 0.0152             # tag edge size in meter with ov3660 camera, 1 calibration
-        camera_device: "/dev/video5"  # camera device path or index (e.g., "/dev/video0" or "0")
+        # camera_device: "/dev/video0"  # camera device path or index (e.g., "/dev/video0" or "0")
+        camera_device: "/dev/jetcocam0"
         max_hamming: 0          # maximum allowed hamming distance (corrected bits)
 
         # see "apriltag.h" 'struct apriltag_detector' for more documentation on these optional parameters

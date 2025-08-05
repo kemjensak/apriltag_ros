@@ -36,8 +36,8 @@ homography(apriltag_detection_t* const detection, const std::array<double, 4>& i
     
     // Apply distance correction
     double measured_distance = std::sqrt(
-        transform.translation.x * transform.translation.x +
-        transform.translation.y * transform.translation.y +
+        // transform.translation.x * transform.translation.x +
+        // transform.translation.y * transform.translation.y +
         transform.translation.z * transform.translation.z
     );
     
